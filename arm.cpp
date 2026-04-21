@@ -7,16 +7,16 @@
 #include <cstdio>
 #include <algorithm>
 
-const float Arm::ID2_ANGLE_OPEN = 150.0f;
-const float Arm::ID2_ANGLE_CLOSE = 90.0f;
+const float Arm::ID2_ANGLE_OPEN = 210.0f;
+const float Arm::ID2_ANGLE_CLOSE = 150.0f;
 const float Arm::ANGLE_MAX = 270.0f;
 
 const float Arm::SERVO0_READY = 200.0f;
-const float Arm::SERVO1_READY = 75.0f;
-const float Arm::SERVO0_GRAB = 235.0f;
-const float Arm::SERVO1_GRAB = 60.0f;
-const float Arm::SERVO0_LIFT = 200.0f;
-const float Arm::SERVO1_LIFT = 180.0f;
+const float Arm::SERVO1_READY = 200.0f;
+const float Arm::SERVO0_GRAB = 250.0f;
+const float Arm::SERVO1_GRAB = 185.0f;
+const float Arm::SERVO0_LIFT = 150.0f;
+const float Arm::SERVO1_LIFT = 185.0f;
 
 Arm::Arm(const std::string& port, int baudrate) : fd_(-1) {
     open_serial(port, baudrate);

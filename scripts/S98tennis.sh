@@ -7,6 +7,7 @@ TENNIS_BIN="/root/tennis"
 TENNIS_MODEL="/root/tennis_cv181x_bf16.cvimodel"
 TENNIS_LOG="/root/tennis.log"
 VI_CHANNEL=0
+export LD_LIBRARY_PATH=/usr/bin/lib:$LD_LIBRARY_PATH
 
 start() {
     echo "[tennis] Starting..."
