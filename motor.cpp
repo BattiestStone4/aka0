@@ -108,3 +108,35 @@ void Motor::standby() {
     set_pwm_enable(RIGHT_WHEEL_FORWARD, false);
     set_pwm_enable(RIGHT_WHEEL_BACKWARD, false);
 }
+
+// Author: Zhihang Shao <dio_ro@outlook.com>
+// Source: aka0-ref commits 755a885, 9c69f3f
+// 差速驱动实现，commit 9c69f3f: 右轮速度补偿+2修正偏差
+void Motor::drive(int left_speed, int right_speed) {
+    // 左轮
+    if (left_speed > 0) {
+        set_speed(LEFT_WHEEL_FORWARD, left_speed);
+        set_pwm_enable(LEFT_WHEEL_FORWARD, true);
+        set_pwm_enable(LEFT_WHEEL_BACKWARD, false);
+    } else if (left_speed < 0) {
+        set_speed(LEFT_WHEEL_BACKWARD, -left_speed);
+        set_pwm_enable(LEFT_WHEEL_BACKWARD, true);
+        set_pwm_enable(LEFT_WHEEL_FORWARD, false);
+    } else {
+        set_pwm_enable(LEFT_WHEEL_FORWARD, false);
+        set_pwm_enable(LEFT_WHEEL_BACKWARD, false);
+    }
+    // 右轮（带+2速度补偿修正偏差）
+    if (right_speed > 0) {
+        set_speed(RIGHT_WHEEL_FORWARD, right_speed + 2);
+        set_pwm_enable(RIGHT_WHEEL_FORWARD, true);
+        set_pwm_enable(RIGHT_WHEEL_BACKWARD, false);
+    } else if (right_speed < 0) {
+        set_speed(RIGHT_WHEEL_BACKWARD, -right_speed + 2);
+        set_pwm_enable(RIGHT_WHEEL_BACKWARD, true);
+        set_pwm_enable(RIGHT_WHEEL_FORWARD, false);
+    } else {
+        set_pwm_enable(RIGHT_WHEEL_FORWARD, false);
+        set_pwm_enable(RIGHT_WHEEL_BACKWARD, false);
+    }
+}

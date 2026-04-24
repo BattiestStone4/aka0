@@ -42,6 +42,9 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/sensor/include)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/sensor/include/isp/sg200x)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/sensor/include/common)
 
+# Add parent directory include path for test files in tests/
+include_directories(${CMAKE_CURRENT_SOURCE_DIR})
+
 # Add sensor library path
 link_directories(${CMAKE_CURRENT_SOURCE_DIR}/sensor/lib)
 
@@ -57,7 +60,10 @@ endif()
 
 set(EXTRA_LIBS ${EXTRA_LIBS} dl stdc++ pthread z atomic)
 
-add_executable(tennis tennis.cpp motor.cpp vi_capture.cpp)
+# Author: Zhihang Shao <dio_ro@outlook.com>
+# Source: aka0-ref commit 755a885
+# 添加机械臂支持
+add_executable(tennis tennis.cpp motor.cpp arm.cpp vi_capture.cpp)
 target_link_libraries(tennis
     ${CVI_LIBS}
     ${OPENCV_LIBS}
@@ -68,3 +74,27 @@ target_link_libraries(tennis
     -Wl,--end-group
     ${EXTRA_LIBS})
 install(TARGETS tennis DESTINATION samples_extra/bin)
+
+# =====================================================
+# Test utilities (in tests/ directory)
+# Author: Zhihang Shao <dio_ro@outlook.com>
+# Source: aka0-ref commits 755a885, 64f8dab
+# =====================================================
+
+# Arm test utility (no SDK dependencies needed)
+add_executable(test_arm tests/test_arm.cpp arm.cpp)
+
+# Motor test utility (no SDK dependencies needed)
+add_executable(test_motor tests/test_motor.cpp motor.cpp)
+
+# Single-frame capture + detection utility
+add_executable(test_capture_detect tests/test_capture_detect.cpp vi_capture.cpp)
+target_link_libraries(test_capture_detect
+    ${CVI_LIBS}
+    ${OPENCV_LIBS}
+    -Wl,--start-group
+    sample isp isp_algo ae awb af
+    vpu cvi_ispd2 cvi_bin_isp cvi_bin
+    sns_full sys ini json-c
+    -Wl,--end-group
+    ${EXTRA_LIBS})

@@ -14,6 +14,11 @@ class Motor {
     void right(int speed);
     void brake();
     void standby();
+    // Author: Zhihang Shao <dio_ro@outlook.com>
+    // Source: aka0-ref commits 755a885, 9c69f3f
+    // 差速驱动：正值前进，负值后退，范围 [-100, 100]
+    // commit 9c69f3f: 右轮速度补偿+2修正偏差
+    void drive(int left_speed, int right_speed);
 
   private:
     void set_pwm_duty_cycle(int pwm_id, int duty_cycle);
