@@ -53,7 +53,7 @@ void Motor::set_speed(int pwm_id, int speed) {
         speed = 0;
     if (speed > 100)
         speed = 100;
-    int duty_cycle = (speed / 100.0) * PERIOD;
+    int duty_cycle = PERIOD - (speed / 100.0) * PERIOD;
     set_pwm_duty_cycle(pwm_id, duty_cycle);
 }
 
