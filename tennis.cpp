@@ -1,3 +1,17 @@
+// Author: Zhihang Shao <dio_ro@outlook.com>
+// Source: aka0-ref commits 64f8dab, 7b7011d, 9c69f3f, d4fbdad
+// Description: 完整的追球抓取状态机 - 两状态(chase/grab) + 脉冲式转向 + 动态脉冲 + 太近后退 + Ctrl-C安全退出
+// 
+// 主要特性：
+// - 两状态机: STATUS_CHASE_TENNIS, STATUS_GRAB_TENNIS
+// - 使用 area_ratio (bbox面积/图像面积) 判断距离
+// - 脉冲式转向防振荡，动态脉冲时间(与area线性相关)
+// - 差速原地转向替代单轮转弯
+// - 太近(area>0.55)自动后退，避免挤到球
+// - 抓取前左转补偿，修正夹爪偏右
+// - 完整抓取序列: 伸下→夹紧→抬起→停2秒→松开→复位
+// - Ctrl-C 信号处理，安全清理资源
+
 #include <stdio.h>
 #include <math.h>
 #include <time.h>
@@ -9,18 +23,20 @@
 #include <errno.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <inttypes.h>
+#include <signal.h>
 #include <opencv2/opencv.hpp>
 #include "cviruntime.h"
 #include "motor.hpp"
+#include "arm.hpp"
 
 // VI related headers - must include base types first
 #include "vi_capture.hpp"
 #include "logger.hpp"
 
 // 控制宏定义
-//#define ENABLE_DEBUG_OUTPUT 0 // Replaced by LOGD
-#define ENABLE_DRAW_BBOX 1    // 是否画框并保存图片
+#define ENABLE_DRAW_BBOX 0    // 是否画框并保存图片
 #define ENABLE_SAVE_IMAGE 0   // 是否保存检测结果图片
 
 typedef struct {
@@ -35,6 +51,25 @@ typedef struct {
 } detection;
 
 static const char* tennis_names[] = {"tennis"}; // 单类别网球检测
+
+// 全局指针，用于信号处理中清理资源
+static VICapture* g_vi_capture = nullptr;
+static Motor* g_motor = nullptr;
+static CVI_MODEL_HANDLE g_model = nullptr;
+
+static void cleanup_and_exit() {
+    if (g_motor) g_motor->standby();
+#if USE_VPSS_RESIZE
+    if (g_vi_capture) g_vi_capture->deinitVpssResize();
+#endif
+    if (g_vi_capture) g_vi_capture->deinit();
+    if (g_model) CVI_NN_CleanupModel(g_model);
+}
+
+static void signal_handler(int sig) {
+    cleanup_and_exit();
+    exit(0);
+}
 
 
 static void usage(char** argv) {
@@ -241,44 +276,47 @@ int getDetections(CVI_TENSOR* output, int32_t input_height, int32_t input_width,
     return count;
 }
 
-// 根据球的位置控制小车移动
-void controlMotor(Motor& motor, float ball_x, float ball_y, int image_width, int image_height) {
-    // 计算球相对于图像中心的位置
-    float center_x = image_width / 2.0f;
-    float center_y = image_height / 2.0f;
-    float offset_x = ball_x - center_x;
-    float offset_y = ball_y - center_y;
+// ============ 状态机 ============
 
-    // 定义阈值
-    float x_threshold = image_width * 0.08f;  // 左右偏移阈值（8%图像宽度）
-    float y_threshold = image_height * 0.08f; // 前后偏移阈值（8%图像高度）
+enum RobotStatus {
+    STATUS_CHASE_TENNIS,     // 追球：area < GRAB_AREA 且球可见
+    STATUS_GRAB_TENNIS,      // 抓取：area >= GRAB_AREA，停车抓球
+};
 
-    int speed = 50; // 基础速度50%
-
-    // 决策逻辑：优先处理左右偏移，然后处理前后距离
-    if (fabs(offset_x) > x_threshold) {
-        // 球偏左或偏右
-        if (offset_x < 0) {
-            LOGD("[MOTOR] LEFT (ball_x=%.1f, offset=%.1f)", ball_x, offset_x);
-            motor.left(speed);
-        } else {
-            LOGD("[MOTOR] RIGHT (ball_x=%.1f, offset=%.1f)", ball_x, offset_x);
-            motor.right(speed);
-        }
-    } else if (offset_y > y_threshold) {
-        // 球在图像下方，表示距离近，后退
-        LOGD("[MOTOR] BACKWARD (ball_y=%.1f, offset=%.1f)", ball_y, offset_y);
-        motor.backward(speed);
-    } else if (offset_y < -y_threshold) {
-        // 球在图像上方，表示距离远，前进
-        LOGD("[MOTOR] FORWARD (ball_y=%.1f, offset=%.1f)", ball_y, offset_y);
-        motor.forward(speed);
-    } else {
-        // 球在中心位置，停止
-        LOGD("[MOTOR] STANDBY (centered)");
-        motor.standby();
+static const char* status_name(RobotStatus s) {
+    switch (s) {
+        case STATUS_CHASE_TENNIS:    return "chase";
+        case STATUS_GRAB_TENNIS:     return "grab";
     }
+    return "unknown";
 }
+
+// 控制参数
+static const int FRAME_WIDTH       = 640;
+static const float GRAB_AREA       = 0.40f;  // area_ratio >= 此值 → 抓取（提前触发抵消惯性）
+static const int CENTER_MARGIN     = 35;     // 球中心距画面中心 ±35px 内算居中
+static const int CHASE_SPEED       = 56;     // 追球前进速度
+static const int TURN_SPEED        = 18;     // 原地转向速度（数值越小越慢）
+static const int IDLE_SPEED        = 18;     // 没看到球时的搜索速度
+static const float K_TURN_PULSE    = 5000.0f; // 转向脉冲系数(ms)：pulse = K * area_ratio
+static const int TURN_PULSE_MIN    = 75 * 1000;  // 最小脉冲 75ms（保证电机能动）
+static const int TURN_PULSE_MAX    = 500 * 1000;  // 最大脉冲 500ms（防止近处转过头丢球）
+static const int GRAB_CONFIRM_THRESHOLD = 5;
+static const float GRAB_AREA_MAX = 0.55f;  // area 超过此值太近，先后退
+static const int BACKWARD_SPEED = 18;      // 后退速度
+static const int BACKWARD_PULSE_US = 200 * 1000; // 后退脉冲时间
+static const int GRAB_LEFT_TURN_SPEED = 18;       // 抓取前左转补偿速度（数值越小越慢）
+static const int GRAB_LEFT_TURN_US    = 150 * 1000; // 抓取前左转补偿时间
+static const int GRAB_LEFT_TURN_COUNT = 4;          // 左转补偿次数
+
+struct RobotState {
+    RobotStatus status;
+    float area_ratio;
+    int ball_cx;    // 球中心 x
+    int grab_confirm_count;
+
+    RobotState() : status(STATUS_CHASE_TENNIS), area_ratio(0), ball_cx(0), grab_confirm_count(0) {}
+};
 
 
 
@@ -286,6 +324,8 @@ void controlMotor(Motor& motor, float ball_x, float ball_y, int image_width, int
 int main(int argc, char** argv) {
     int ret = 0;
     CVI_MODEL_HANDLE model;
+
+
 
     if (argc < 2 || argc > 3) {
         usage(argv);
@@ -297,16 +337,18 @@ int main(int argc, char** argv) {
         vi_channel = atoi(argv[2]);
     }
 
-    LOGI("Using VI channel: %d", vi_channel);
+    // 清理上次异常退出残留的硬件资源
+    {
+        VICapture cleanup_vi;
+        cleanup_vi.deinit();  // 无操作或释放残留资源
+    }
 
     // Initialize VI system
     VICapture vi_capture;
-    LOGI("Initializing VI system...");
+    g_vi_capture = &vi_capture;
     if (vi_capture.init() != CVI_SUCCESS) {
-        LOGE("Failed to initialize VI system");
         exit(-1);
     }
-    LOGI("VI system initialized successfully");
 
     // Wait for sensor to stabilize
     usleep(500 * 1000);
@@ -322,8 +364,12 @@ int main(int argc, char** argv) {
     LOGI("VPSS initialized successfully");
 #endif
 
-    // 初始化电机
+    // 初始化电机、机械臂和状态机
     Motor motor;
+    g_motor = &motor;
+    Arm arm;
+    RobotState robot;
+    arm.grab_pos(); // 机械臂回到待抓取位置
     CVI_TENSOR* input;
     CVI_TENSOR* output;
     CVI_TENSOR* input_tensors;
@@ -339,8 +385,8 @@ int main(int argc, char** argv) {
     float conf_thresh = 0.5;
     float iou_thresh = 0.5;
     ret = CVI_NN_RegisterModel(argv[1], &model);
+    g_model = model;
     if (ret != CVI_RC_SUCCESS) {
-        LOGE("CVI_NN_RegisterModel failed, err %d", ret);
         exit(1);
     }
     LOGI("CVI_NN_RegisterModel succeeded");
@@ -375,6 +421,10 @@ int main(int argc, char** argv) {
     int frame_count = 0;
 
     cv::setNumThreads(1);
+
+    // 注册信号处理，确保 Ctrl-C 时清理硬件资源
+    signal(SIGINT, signal_handler);
+    signal(SIGTERM, signal_handler);
 
     while (true) {
         gettimeofday(&start_time, NULL);
@@ -439,62 +489,159 @@ int main(int argc, char** argv) {
         correctYoloBoxes(dets, det_num, cloned.rows, cloned.cols, height, width);
         gettimeofday(&t2, NULL);
         long postprocess_time = (t2.tv_sec - t1.tv_sec) * 1000000 + (t2.tv_usec - t1.tv_usec);
-        // 打印检测到的对象信息并控制电机
+        // ============ 状态机控制逻辑 ============
         if (det_num > 0) {
-            // 选择置信度最高的球
+            // 选择最大的球（最近的）
             int best_idx = 0;
-            float best_score = dets[0].score;
             for (int i = 1; i < det_num; i++) {
-                if (dets[i].score > best_score) {
-                    best_score = dets[i].score;
+                if (dets[i].bbox.w * dets[i].bbox.h > dets[best_idx].bbox.w * dets[best_idx].bbox.h)
                     best_idx = i;
-                }
             }
 
             box b = dets[best_idx].bbox;
-            LOGI("[DETECT] Ball found: pos(%.1f, %.1f), conf=%.3f", b.x, b.y, dets[best_idx].score);
+            float img_area = cloned.cols * cloned.rows;
+            float area_ratio = (b.w * b.h) / img_area;
+            int ball_cx = static_cast<int>(b.x);
+            int center = FRAME_WIDTH / 2;
 
-            // 根据球的位置控制电机
-            controlMotor(motor, b.x, b.y, cloned.cols, cloned.rows);
-            
+            robot.area_ratio = area_ratio;
+            robot.ball_cx = ball_cx;
+
+            LOGI("[DETECT] area=%.3f cx=%d conf=%.3f status=%s",
+                 area_ratio, ball_cx, dets[best_idx].score, status_name(robot.status));
+
+            int offset = ball_cx - center;
+            bool centered = abs(offset) <= CENTER_MARGIN;
+
+            // 动态脉冲时间：area 越大脉冲越长，避免远距离转过头
+            int pulse_us = std::max(TURN_PULSE_MIN, std::min(TURN_PULSE_MAX, (int)(K_TURN_PULSE * area_ratio * 1000)));
+
+            if (area_ratio >= GRAB_AREA && centered) {
+                // 球足够近且居中 → 确认计数
+                robot.grab_confirm_count++;
+                LOGI("[GRAB] confirm %d/%d (area=%.3f cx=%d)", robot.grab_confirm_count, GRAB_CONFIRM_THRESHOLD, area_ratio, ball_cx);
+
+                if (area_ratio >= GRAB_AREA_MAX) {
+                    // 太近了，微微后退
+                    LOGI("[GRAB] Too close (area=%.3f > %.3f), backing up", area_ratio, GRAB_AREA_MAX);
+                    motor.backward(BACKWARD_SPEED);
+                    usleep(BACKWARD_PULSE_US);
+                    motor.standby();
+                } else {
+                    motor.standby();
+                }
+
+                if (robot.grab_confirm_count >= GRAB_CONFIRM_THRESHOLD) {
+                    // 太近后退一步再抓
+                    if (area_ratio >= GRAB_AREA_MAX) {
+                        LOGI("[GRAB] Backing up before grab");
+                        motor.backward(BACKWARD_SPEED);
+                        usleep(BACKWARD_PULSE_US);
+                        motor.standby();
+                    }
+
+                    LOGI("[ARM] Confirmed, compensating gripper offset...");
+
+                    // 爪子偏右，连续多次左转补偿
+                    for (int i = 0; i < GRAB_LEFT_TURN_COUNT; i++) {
+                        LOGI("[GRAB] Left turn compensation %d/%d (%dms)", i + 1, GRAB_LEFT_TURN_COUNT, GRAB_LEFT_TURN_US / 1000);
+                        motor.drive(-GRAB_LEFT_TURN_SPEED, GRAB_LEFT_TURN_SPEED);
+                        usleep(GRAB_LEFT_TURN_US);
+                        motor.standby();
+                        usleep(100 * 1000);  // 间隔100ms
+                    }
+
+                    LOGI("[ARM] Full grab sequence");
+
+                    // 抓取: 伸下→夹紧→抬起→停2秒
+                    arm.grab();
+                    usleep(2000 * 1000);
+
+                    // 松开→复位
+                    arm.release();
+                    usleep(1000 * 1000);
+                    arm.grab_pos();
+                    usleep(1000 * 1000);
+                    robot.grab_confirm_count = 0;
+                    robot.status = STATUS_CHASE_TENNIS;
+                }
+            } else if (area_ratio >= GRAB_AREA && !centered) {
+                // 球够近但没居中 → 原地微调（脉冲式），不前进
+                robot.grab_confirm_count = 0;
+                LOGI("[ALIGN] area=%.3f OK but cx=%d not centered, pulse=%dms", area_ratio, ball_cx, pulse_us / 1000);
+                if (offset < 0) {
+                    motor.drive(-TURN_SPEED, TURN_SPEED);
+                } else {
+                    motor.drive(TURN_SPEED, -TURN_SPEED);
+                }
+                usleep(pulse_us);
+                motor.standby();
+            } else {
+                // 追球
+                robot.grab_confirm_count = 0;
+                robot.status = STATUS_CHASE_TENNIS;
+
+                if (!centered) {
+                    // 球偏左或偏右 → 差速原地转向（脉冲式）
+                    if (offset < 0) {
+                        LOGI("[MOTOR] TURN LEFT (cx=%d offset=%d pulse=%dms)", ball_cx, offset, pulse_us / 1000);
+                        motor.drive(-TURN_SPEED, TURN_SPEED);
+                    } else {
+                        LOGI("[MOTOR] TURN RIGHT (cx=%d offset=%d pulse=%dms)", ball_cx, offset, pulse_us / 1000);
+                        motor.drive(TURN_SPEED, -TURN_SPEED);
+                    }
+                    usleep(pulse_us);
+                    motor.standby();
+                } else {
+                    // 球基本居中 → 前进
+                    LOGI("[MOTOR] FORWARD (cx=%d area=%.3f < %.3f)", ball_cx, area_ratio, GRAB_AREA);
+                    motor.forward(CHASE_SPEED);
+                }
+            }
+
 #if ENABLE_DRAW_BBOX
-            // draw bbox on image (only when ball detected)
             for (int i = 0; i < det_num; i++) {
                 box b = dets[i].bbox;
-                // xywh2xyxy
-                int x1 = (b.x - b.w / 2);
-                int y1 = (b.y - b.h / 2);
-                int x2 = (b.x + b.w / 2);
-                int y2 = (b.y + b.h / 2);
-
-                // 确保坐标在图像范围内
-                x1 = std::max(0, std::min(x1, cloned.cols - 1));
-                y1 = std::max(0, std::min(y1, cloned.rows - 1));
-                x2 = std::max(0, std::min(x2, cloned.cols - 1));
-                y2 = std::max(0, std::min(y2, cloned.rows - 1));
-
+                int x1 = std::max(0, (int)(b.x - b.w / 2));
+                int y1 = std::max(0, (int)(b.y - b.h / 2));
+                int x2 = std::min(cloned.cols - 1, (int)(b.x + b.w / 2));
+                int y2 = std::min(cloned.rows - 1, (int)(b.y + b.h / 2));
                 cv::rectangle(cloned, cv::Point(x1, y1), cv::Point(x2, y2), cv::Scalar(0, 255, 255), 3, 8, 0);
+                float ar = (b.w * b.h) / img_area;
                 char content[100];
-                sprintf(content, "%s %0.3f", tennis_names[dets[i].cls], dets[i].score);
-                cv::putText(cloned, content, cv::Point(x1, y1 - 10), cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0, 0, 255),
-                            2);
+                sprintf(content, "tennis %.3f area:%.3f", dets[i].score, ar);
+                cv::putText(cloned, content, cv::Point(x1, y1 - 10), cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0, 0, 255), 2);
             }
+
+            // Center line (red)
+            cv::line(cloned, cv::Point(center, 0), cv::Point(center, cloned.rows), cv::Scalar(0, 0, 255), 1);
+            // Center margin lines (green)
+            cv::line(cloned, cv::Point(center - CENTER_MARGIN, 0), cv::Point(center - CENTER_MARGIN, cloned.rows), cv::Scalar(0, 255, 0), 1);
+            cv::line(cloned, cv::Point(center + CENTER_MARGIN, 0), cv::Point(center + CENTER_MARGIN, cloned.rows), cv::Scalar(0, 255, 0), 1);
+
+            // Status info
+            char info[128];
+            sprintf(info, "status=%s area=%.3f cx=%d grab_area=%.2f",
+                    status_name(robot.status), area_ratio, ball_cx, GRAB_AREA);
+            cv::putText(cloned, info, cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(255, 255, 255), 2);
 #endif
 
-
         } else {
-            LOGI("[DETECT] No ball detected");
-            LOGI("[MOTOR] STANDBY");
-            motor.standby();
+            LOGI("[DETECT] No ball detected, searching...");
+            robot.grab_confirm_count = 0;
+            robot.status = STATUS_CHASE_TENNIS;
+            motor.drive(IDLE_SPEED, -IDLE_SPEED);  // 没看到球就连续右转搜索
         }
         
 #if ENABLE_SAVE_IMAGE
-            // save picture with detection results (only when ball detected)
-            char output_path[256];
-            sprintf(output_path, "/boot/images/detected_%d.jpg", frame_idx);
-            LOGD("[DEBUG] Saving image: %dx%d, channels: %d", cloned.cols, cloned.rows, cloned.channels());
-            cv::imwrite(output_path, cloned);
-            LOGI("[SAVE] %s", output_path);
+            {
+                const char* save_dir = "/root/images";
+                mkdir(save_dir, 0755);  // ensure directory exists
+                char output_path[256];
+                sprintf(output_path, "%s/detected_%d.jpg", save_dir, frame_idx);
+                bool ok = cv::imwrite(output_path, cloned);
+                LOGI("[SAVE] %s %s", output_path, ok ? "OK" : "FAILED");
+            }
 #endif
         // 计算帧率
         gettimeofday(&end_time, NULL);
@@ -505,27 +652,14 @@ int main(int argc, char** argv) {
         total_time_us += frame_time_us;
         float avg_fps = 1000000.0f * frame_count / total_time_us;
 
-        LOGI("[FPS] Current: %.2f, Average: %.2f (total: %.2f ms)", fps, avg_fps, frame_time_us / 1000.0f);
-        LOGD("[PROFILE] Read: %.2f ms, Preprocess: %.2f ms, Inference: %.2f ms, "
-               "Postprocess: %.2f ms",
-               read_time / 1000.0f, preprocess_time / 1000.0f, inference_time / 1000.0f, postprocess_time / 1000.0f);
+        LOGI("[FPS] %.2f  avg: %.2f  (%.1fms)", fps, avg_fps, frame_time_us / 1000.0f);
 
-        // 每处理完一张图片，休眠一段时间再处理下一张
-        // usleep(500000); // 休眠0.5秒
-        if (frame_idx >= 200) {
-            // 处理200帧后退出
-            break;
-        }
+        // 持续运行，无帧数限制
+        // if (frame_idx >= 200) break;
     } // end while loop
 
     // Cleanup
-    printf("\nCleaning up...\n");
-#if USE_VPSS_RESIZE
-    vi_capture.deinitVpssResize();
-#endif
-    vi_capture.deinit();
-    CVI_NN_CleanupModel(model);
-    printf("CVI_NN_CleanupModel succeeded\n");
+    cleanup_and_exit();
     free(output_shape);
     return 0;
 }
