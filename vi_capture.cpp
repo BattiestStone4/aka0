@@ -5,7 +5,354 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-// VI related headers needed for implementation
+#if USE_UART_CAMERA
+// ============================================================================
+// Linux UART Camera Implementation (ESP32-CAM over UART)
+// ============================================================================
+
+#include <time.h>
+#include <stdlib.h>
+
+VICapture::VICapture() : m_fd(-1), m_rx_len(0), m_seq(0) {
+    memset(m_rx_buf, 0, sizeof(m_rx_buf));
+}
+
+VICapture::~VICapture() { deinit(); }
+
+// ---- CRC-16/CCITT ----
+
+static uint16_t crc16Ccitt(const uint8_t *data, size_t len) {
+    uint16_t crc = 0xFFFF;
+    for (size_t i = 0; i < len; i++) {
+        crc ^= (uint16_t)data[i] << 8;
+        for (int j = 0; j < 8; j++) {
+            if (crc & 0x8000)
+                crc = (crc << 1) ^ 0x1021;
+            else
+                crc <<= 1;
+        }
+    }
+    return crc;
+}
+
+// ---- SLIP framing ----
+
+size_t VICapture::slipEncode(const uint8_t *in, size_t in_len, uint8_t *out) {
+    size_t pos = 0;
+    out[pos++] = UART_SLIP_END;
+    for (size_t i = 0; i < in_len; i++) {
+        if (in[i] == UART_SLIP_END) {
+            out[pos++] = UART_SLIP_ESC;
+            out[pos++] = UART_SLIP_ESC_END;
+        } else if (in[i] == UART_SLIP_ESC) {
+            out[pos++] = UART_SLIP_ESC;
+            out[pos++] = UART_SLIP_ESC_ESC;
+        } else {
+            out[pos++] = in[i];
+        }
+    }
+    out[pos++] = UART_SLIP_END;
+    return pos;
+}
+
+int VICapture::slipDecode(const uint8_t *in, size_t in_len,
+                           uint8_t *out, size_t *out_len) {
+    size_t j = 0;
+    for (size_t i = 0; i < in_len; i++) {
+        if (in[i] == UART_SLIP_ESC) {
+            if (++i >= in_len) return -1;
+            if (in[i] == UART_SLIP_ESC_END)
+                out[j++] = UART_SLIP_END;
+            else if (in[i] == UART_SLIP_ESC_ESC)
+                out[j++] = UART_SLIP_ESC;
+            else
+                return -1;
+        } else {
+            out[j++] = in[i];
+        }
+    }
+    *out_len = j;
+    return 0;
+}
+
+// ---- UART helpers ----
+
+speed_t VICapture::baudToSpeed(int baud) {
+    switch (baud) {
+    case 9600:    return B9600;
+    case 19200:   return B19200;
+    case 38400:   return B38400;
+    case 57600:   return B57600;
+    case 115200:  return B115200;
+    case 230400:  return B230400;
+    case 460800:  return B460800;
+    case 921600:  return B921600;
+    case 1000000: return B1000000;
+    case 1500000: return B1500000;
+    case 2000000: return B2000000;
+    case 2500000: return B2500000;
+    case 3000000: return B3000000;
+    case 3500000: return B3500000;
+    case 4000000: return B4000000;
+    default:      return 0;
+    }
+}
+
+int VICapture::writeAll(const uint8_t *data, size_t len) {
+    size_t sent = 0;
+    while (sent < len) {
+        ssize_t n = write(m_fd, data + sent, len - sent);
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EINTR) continue;
+            return -1;
+        }
+        sent += n;
+    }
+    return 0;
+}
+
+static int64_t nowMs(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+int VICapture::readSlipFrame(int timeout_ms, uint8_t *frame, size_t *frame_len) {
+    int64_t deadline = nowMs() + timeout_ms;
+
+    for (;;) {
+        size_t start = 0;
+        while (start < m_rx_len && m_rx_buf[start] == UART_SLIP_END)
+            start++;
+        if (start > 0 && start < m_rx_len) {
+            memmove(m_rx_buf, m_rx_buf + start, m_rx_len - start);
+            m_rx_len -= start;
+        } else if (start >= m_rx_len) {
+            m_rx_len = 0;
+        }
+
+        for (size_t i = 0; i < m_rx_len; i++) {
+            if (m_rx_buf[i] == UART_SLIP_END) {
+                if (i > 0) {
+                    if (slipDecode(m_rx_buf, i, frame, frame_len) == 0) {
+                        memmove(m_rx_buf, m_rx_buf + i + 1, m_rx_len - i - 1);
+                        m_rx_len -= i + 1;
+                        return 0;
+                    }
+                }
+                memmove(m_rx_buf, m_rx_buf + i + 1, m_rx_len - i - 1);
+                m_rx_len -= i + 1;
+                break;
+            }
+        }
+
+        int64_t remain = deadline - nowMs();
+        if (remain <= 0) return -1;
+
+        struct timeval tv = {
+            .tv_sec  = remain / 1000,
+            .tv_usec = (remain % 1000) * 1000
+        };
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(m_fd, &rfds);
+
+        int ret = select(m_fd + 1, &rfds, NULL, NULL, &tv);
+        if (ret > 0) {
+            ssize_t n = read(m_fd, m_rx_buf + m_rx_len, UART_RX_BUF_SIZE - m_rx_len);
+            if (n > 0) m_rx_len += n;
+        }
+    }
+}
+
+// ---- Protocol layer ----
+
+static size_t buildPacket(uint8_t type, uint8_t seq,
+                           const uint8_t *payload, uint16_t payload_len,
+                           uint8_t *out) {
+    out[0] = type;
+    out[1] = seq;
+    out[2] = payload_len & 0xFF;
+    out[3] = (payload_len >> 8) & 0xFF;
+    if (payload_len > 0 && payload)
+        memcpy(out + 4, payload, payload_len);
+    uint16_t crc = crc16Ccitt(out, 4 + payload_len);
+    out[4 + payload_len]     = crc & 0xFF;
+    out[4 + payload_len + 1] = (crc >> 8) & 0xFF;
+    return 4 + payload_len + 2;
+}
+
+static int parsePacket(const uint8_t *data, size_t len,
+                        uint8_t *type, uint8_t *seq,
+                        const uint8_t **payload, uint16_t *payload_len) {
+    if (len < 6) return -1;
+    *type = data[0];
+    *seq  = data[1];
+    *payload_len = data[2] | ((uint16_t)data[3] << 8);
+    if (len != (size_t)(4 + *payload_len + 2)) return -1;
+    *payload = data + 4;
+
+    uint16_t recv_crc = data[4 + *payload_len] |
+                        ((uint16_t)data[4 + *payload_len + 1] << 8);
+    uint16_t calc_crc = crc16Ccitt(data, 4 + *payload_len);
+    if (recv_crc != calc_crc) return -1;
+    return 0;
+}
+
+int VICapture::uartSend(uint8_t cmd, const uint8_t *payload, uint16_t payload_len) {
+    uint8_t pkt[UART_MAX_PACKET_SIZE];
+    size_t pkt_len = buildPacket(cmd, m_seq, payload, payload_len, pkt);
+
+    uint8_t slip_buf[UART_MAX_PACKET_SIZE * 2 + 2];
+    size_t slip_len = slipEncode(pkt, pkt_len, slip_buf);
+
+    int ret = writeAll(slip_buf, slip_len);
+    if (ret == 0) m_seq = (m_seq + 1) & 0xFF;
+    return ret;
+}
+
+int VICapture::uartRecv(int timeout_ms, uint8_t *type, uint8_t *seq,
+                         const uint8_t **payload, uint16_t *payload_len,
+                         uint8_t *frame_buf) {
+    size_t frame_len = 0;
+    if (readSlipFrame(timeout_ms > 0 ? timeout_ms : UART_DEFAULT_TIMEOUT_MS,
+                      frame_buf, &frame_len) != 0)
+        return -1;
+    return parsePacket(frame_buf, frame_len, type, seq, payload, payload_len);
+}
+
+int VICapture::uartRequest(uint8_t cmd, const uint8_t *req, uint16_t req_len,
+                            uint8_t *rsp_buf,
+                            const uint8_t **rsp_payload, uint16_t *rsp_len) {
+    uint8_t sent_seq = m_seq;
+    if (uartSend(cmd, req, req_len) != 0) return -1;
+
+    uint8_t rtype, rseq;
+    if (uartRecv(0, &rtype, &rseq, rsp_payload, rsp_len, rsp_buf) != 0)
+        return -1;
+    if (rtype != (cmd | UART_RESP_MASK) || rseq != sent_seq)
+        return -1;
+    return 0;
+}
+
+// ---- VICapture public methods (UART mode) ----
+
+int VICapture::init() {
+    const char *dev = getenv("UART_DEV");
+    if (!dev) dev = UART_DEFAULT_DEV;
+    int baud = UART_DEFAULT_BAUD;
+    const char *baud_env = getenv("UART_BAUD");
+    if (baud_env) baud = atoi(baud_env);
+
+    m_fd = open(dev, O_RDWR | O_NOCTTY | O_NONBLOCK);
+    if (m_fd < 0) {
+        fprintf(stderr, "[UART] open %s failed: %s\n", dev, strerror(errno));
+        return CVI_FAILURE;
+    }
+
+    speed_t speed = baudToSpeed(baud);
+    if (speed == 0) {
+        fprintf(stderr, "[UART] unsupported baud: %d\n", baud);
+        close(m_fd); m_fd = -1;
+        return CVI_FAILURE;
+    }
+
+    struct termios tty;
+    tcgetattr(m_fd, &tty);
+    cfmakeraw(&tty);
+    tty.c_cflag |= CREAD | CLOCAL;
+    tty.c_cc[VMIN] = 0;
+    tty.c_cc[VTIME] = 0;
+    cfsetispeed(&tty, speed);
+    cfsetospeed(&tty, speed);
+    tcsetattr(m_fd, TCSANOW, &tty);
+    tcflush(m_fd, TCIOFLUSH);
+
+    m_rx_len = 0;
+    m_seq = 0;
+
+    uint8_t rsp_buf[UART_MAX_PACKET_SIZE];
+    const uint8_t *payload;
+    uint16_t plen;
+    if (uartRequest(UART_CMD_INIT, NULL, 0, rsp_buf, &payload, &plen) != 0) {
+        fprintf(stderr, "[UART] init command failed\n");
+        close(m_fd); m_fd = -1;
+        return CVI_FAILURE;
+    }
+
+    LOGI("[UART] camera initialized (dev=%s baud=%d)", dev, baud);
+    return CVI_SUCCESS;
+}
+
+void VICapture::deinit() {
+    if (m_fd >= 0) {
+        close(m_fd);
+        m_fd = -1;
+    }
+}
+
+int VICapture::getFrameAsBGR(CVI_U8 chn, cv::Mat& bgr_image) {
+    uint8_t rsp_buf[UART_MAX_PACKET_SIZE];
+    const uint8_t *payload;
+    uint16_t plen;
+
+    if (uartRequest(UART_CMD_GET_CAMERA_FRAME, NULL, 0, rsp_buf, &payload, &plen) != 0)
+        return CVI_FAILURE;
+
+    if (plen < 4) return CVI_FAILURE;
+
+    uint32_t frame_len = payload[0] | ((uint32_t)payload[1] << 8) |
+                         ((uint32_t)payload[2] << 16) | ((uint32_t)payload[3] << 24);
+
+    if (frame_len == 0 || frame_len > UART_FRAME_MAX_SIZE)
+        return CVI_FAILURE;
+
+    uint8_t *data = (uint8_t*)malloc(frame_len);
+    if (!data) return CVI_FAILURE;
+
+    size_t received = 0;
+    if (plen > 4) {
+        size_t extra = plen - 4;
+        if (extra > frame_len) extra = frame_len;
+        memcpy(data, payload + 4, extra);
+        received = extra;
+    }
+
+    uint8_t chunk_buf[UART_MAX_PACKET_SIZE];
+    while (received < frame_len) {
+        uint8_t ctype, cseq;
+        const uint8_t *cpayload;
+        uint16_t cplen;
+
+        if (uartRecv(UART_CHUNK_TIMEOUT_MS, &ctype, &cseq, &cpayload, &cplen, chunk_buf) != 0) {
+            free(data);
+            return CVI_FAILURE;
+        }
+        if (ctype != UART_RESP_FRAME_CHUNK) {
+            free(data);
+            return CVI_FAILURE;
+        }
+
+        size_t to_copy = cplen;
+        if (received + to_copy > frame_len)
+            to_copy = frame_len - received;
+        memcpy(data + received, cpayload, to_copy);
+        received += to_copy;
+    }
+
+    cv::Mat raw(1, frame_len, CV_8UC1, data);
+    bgr_image = cv::imdecode(raw, cv::IMREAD_COLOR);
+    free(data);
+
+    if (bgr_image.empty()) return CVI_FAILURE;
+    return CVI_SUCCESS;
+}
+
+#else
+// ============================================================================
+// Starry CVI SDK VI Capture Implementation (original)
+// ============================================================================
+
 #include <linux/cvi_common.h>
 #include <linux/cvi_comm_video.h>
 #include "cvi_buffer.h"
@@ -183,8 +530,8 @@ int VICapture::initVpssResize(int input_w, int input_h, int output_w, int output
     }
 
     m_bVpssInited = true;
-    LOGI("VPSS initialized: %dx%d -> %dx%d (PixelFormat=%s, Flip/Mirror enabled)", 
-         input_w, input_h, output_w, output_h, 
+    LOGI("VPSS initialized: %dx%d -> %dx%d (PixelFormat=%s, Flip/Mirror enabled)",
+         input_w, input_h, output_w, output_h,
          (stVpssChnAttr.enPixelFormat == PIXEL_FORMAT_BGR_888) ? "BGR_888" : "NV21");
     return CVI_SUCCESS;
 }
@@ -218,7 +565,7 @@ int VICapture::getFrameAsBGR(CVI_U8 chn, cv::Mat& bgr_image) {
 
         // Use VPSS hardware to resize
         gettimeofday(&t1, NULL);
-        
+
         // Send frame to VPSS for hardware resize
         CVI_S32 s32Ret = CVI_VPSS_SendFrame(m_VpssGrp, &stVideoFrame, -1);
         if (s32Ret != CVI_SUCCESS) {
@@ -226,7 +573,7 @@ int VICapture::getFrameAsBGR(CVI_U8 chn, cv::Mat& bgr_image) {
             CVI_VI_ReleaseChnFrame(0, chn, &stVideoFrame);
             return CVI_FAILURE;
         }
-        
+
         // Get resized frame from VPSS
         VIDEO_FRAME_INFO_S stResizedFrame;
         s32Ret = CVI_VPSS_GetChnFrame(m_VpssGrp, m_VpssChn, &stResizedFrame, 1000);
@@ -244,13 +591,13 @@ int VICapture::getFrameAsBGR(CVI_U8 chn, cv::Mat& bgr_image) {
         int width = stResizedFrame.stVFrame.u32Width;
         int height = stResizedFrame.stVFrame.u32Height;
         int stride_y = stResizedFrame.stVFrame.u32Stride[0];
-        
+
         // VPSS Hardware BGR Output Path (Default)
         if (stResizedFrame.stVFrame.enPixelFormat == PIXEL_FORMAT_BGR_888) {
              size_t image_size = stride_y * height;
              // Use Cached Mmap for faster memory copy (vital for performance)
              CVI_VOID* vir_addr = CVI_SYS_MmapCache(stResizedFrame.stVFrame.u64PhyAddr[0], image_size);
-             
+
              // Invalidate cache to ensure we read fresh data from DRAM
              CVI_SYS_IonInvalidateCache(stResizedFrame.stVFrame.u64PhyAddr[0], vir_addr, image_size);
 
@@ -266,14 +613,14 @@ int VICapture::getFrameAsBGR(CVI_U8 chn, cv::Mat& bgr_image) {
                      memcpy(bgr_image.data + i * width * 3, (uint8_t*)vir_addr + i * stride_y, width * 3);
                  }
              }
-             
+
              CVI_SYS_Munmap(vir_addr, image_size);
-             
+
              gettimeofday(&t2, NULL);
              cvt_us = (t2.tv_sec - t1.tv_sec) * 1000000 + (t2.tv_usec - t1.tv_usec);
-             //printf("[VI-DETAIL] GetFrame: %.1fms, VPSS_Resize+CvB: %.1fms, Cvt: %.1fms (VPSSDirect+Cache)\n", 
+             //printf("[VI-DETAIL] GetFrame: %.1fms, VPSS_Resize+CvB: %.1fms, Cvt: %.1fms (VPSSDirect+Cache)\n",
              //       get_frame_us / 1000.0, resize_us / 1000.0, cvt_us / 1000.0);
-                    
+
              CVI_VPSS_ReleaseChnFrame(m_VpssGrp, m_VpssChn, &stResizedFrame);
              CVI_VI_ReleaseChnFrame(0, chn, &stVideoFrame);
              return CVI_SUCCESS;
@@ -308,7 +655,7 @@ int VICapture::getFrameAsBGR(CVI_U8 chn, cv::Mat& bgr_image) {
         gettimeofday(&t2, NULL);
         cvt_us = (t2.tv_sec - t1.tv_sec) * 1000000 + (t2.tv_usec - t1.tv_usec);
 
-        //printf("[VI-DETAIL] GetFrame: %.1fms, VPSS_Resize: %.1fms, Cvt: %.1fms (Stride=%d)\n", 
+        //printf("[VI-DETAIL] GetFrame: %.1fms, VPSS_Resize: %.1fms, Cvt: %.1fms (Stride=%d)\n",
         //       get_frame_us / 1000.0, resize_us / 1000.0, cvt_us / 1000.0, stride_y);
 
         CVI_SYS_Munmap(vir_addr, image_size);
@@ -404,3 +751,5 @@ int VICapture::getFrameAsBGR(CVI_U8 chn, cv::Mat& bgr_image) {
     LOGE("CVI_VI_GetChnFrame NG");
     return CVI_FAILURE;
 }
+
+#endif // USE_UART_CAMERA

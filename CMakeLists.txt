@@ -86,3 +86,6 @@ target_link_libraries(capture
     sns_full sys ini json-c
     -Wl,--end-group
     ${EXTRA_LIBS})
+
+# Camera test utility (ESP32 UART, pure C, no dependencies)
+add_executable(camera_test camera_test.c)

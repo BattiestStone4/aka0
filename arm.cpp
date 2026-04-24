@@ -27,19 +27,28 @@ Arm::~Arm() {
 }
 
 void Arm::open_serial(const std::string& port, int baudrate) {
+    fprintf(stderr, "[ARM] opening %s ...\n", port.c_str());
+    fflush(stderr);
+
     fd_ = open(port.c_str(), O_RDWR | O_NOCTTY | O_NDELAY);
     if (fd_ < 0) {
-        LOGE("[ARM] Failed to open serial port %s: %s", port.c_str(), strerror(errno));
+        fprintf(stderr, "[ARM] FAILED to open %s: %s (errno=%d)\n", port.c_str(), strerror(errno), errno);
+        fflush(stderr);
         return;
     }
+    fprintf(stderr, "[ARM] open OK, fd=%d\n", fd_);
+    fflush(stderr);
 
     struct termios tty;
     memset(&tty, 0, sizeof(tty));
     if (tcgetattr(fd_, &tty) != 0) {
-        LOGE("[ARM] tcgetattr failed: %s", strerror(errno));
+        fprintf(stderr, "[ARM] tcgetattr FAILED: %s (errno=%d)\n", strerror(errno), errno);
+        fflush(stderr);
         close_serial();
         return;
     }
+    fprintf(stderr, "[ARM] tcgetattr OK\n");
+    fflush(stderr);
 
     speed_t baud;
     switch (baudrate) {
@@ -70,12 +79,14 @@ void Arm::open_serial(const std::string& port, int baudrate) {
 
     tcflush(fd_, TCIFLUSH);
     if (tcsetattr(fd_, TCSANOW, &tty) != 0) {
-        LOGE("[ARM] tcsetattr failed: %s", strerror(errno));
+        fprintf(stderr, "[ARM] tcsetattr FAILED: %s (errno=%d)\n", strerror(errno), errno);
+        fflush(stderr);
         close_serial();
         return;
     }
 
-    LOGI("[ARM] Serial port %s opened at %d baud", port.c_str(), baudrate);
+    fprintf(stderr, "[ARM] serial %s @ %d baud ready\n", port.c_str(), baudrate);
+    fflush(stderr);
 }
 
 void Arm::close_serial() {
@@ -87,10 +98,13 @@ void Arm::close_serial() {
 
 void Arm::send_command(const std::string& cmd) {
     if (fd_ < 0) {
-        LOGE("[ARM] Serial port not open, cannot send: %s", cmd.c_str());
+        fprintf(stderr, "[ARM] send_command but fd=-1: %s\n", cmd.c_str());
+        fflush(stderr);
         return;
     }
-    write(fd_, cmd.c_str(), cmd.size());
+    ssize_t n = write(fd_, cmd.c_str(), cmd.size());
+    fprintf(stderr, "[ARM] write '%s' -> %zd (errno=%d)\n", cmd.c_str(), n, errno);
+    fflush(stderr);
     tcdrain(fd_);
 }
 
@@ -148,12 +162,6 @@ void Arm::grab() {
     // 3. 抬起展示
     set_angle(0, SERVO0_LIFT);
     set_angle(1, SERVO1_LIFT);
-    // servo2 保持闭合
-    usleep(1000 * 1000);
-
-    // 4. 回到初始位置，爪子仍闭合
-    set_angle(0, SERVO0_READY);
-    set_angle(1, SERVO1_READY);
     // servo2 保持闭合
     usleep(1000 * 1000);
 

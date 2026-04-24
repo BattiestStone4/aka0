@@ -25,6 +25,7 @@ cmake .. \
     -DCMAKE_CXX_COMPILER=${CXX} \
     -DCMAKE_C_FLAGS="-O2 -mcpu=c906fdv -mabi=lp64d" \
     -DCMAKE_CXX_FLAGS="-O2 -mcpu=c906fdv -mabi=lp64d" \
+    -DCMAKE_EXE_LINKER_FLAGS="-Wl,--dynamic-linker=/lib/ld-musl-riscv64v0p7_xthead.so.1" \
     -DCMAKE_CROSSCOMPILING=ON \
     -DTPU_SDK_PATH=${TPU_SDK_PATH} \
     -DOPENCV_PATH=${OPENCV_PATH} \
@@ -33,5 +34,16 @@ cmake .. \
 # 编译
 make -j$(nproc)
 
-echo "Debug version compiled successfully!"
-echo "Executable: $(pwd)/tennis"
+echo ""
+echo "=== Build Results ==="
+for bin in tennis capture camera_test arm_test motor_test; do
+    if [ -f "$bin" ]; then
+        size=$(ls -lh "$bin" | awk '{print $5}')
+        echo "  $bin  $size"
+    else
+        echo "  $bin  MISSING"
+    fi
+done
+
+echo ""
+echo "Done! Binaries in: $(pwd)"
