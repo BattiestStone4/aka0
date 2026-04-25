@@ -12,17 +12,17 @@ echo "Using TPU_SDK_PATH: $TPU_SDK_PATH"
 echo "Using OPENCV_PATH: $OPENCV_PATH"
 
 # 清理之前的构建
-rm -rf build_riscv_debug
-mkdir -p build_riscv_debug
-cd build_riscv_debug
+rm -rf build_riscv_release
+mkdir -p build_riscv_release
+cd build_riscv_release
 
-# 配置cmake
-# LOG_LEVEL可以通过环境变量设置，默认为debug
-# 使用方法: LOG_LEVEL=warn ./build_riscv_debug.sh
-LOG_LEVEL=${LOG_LEVEL:-debug}
+# 配置cmake - Release版本
+# LOG_LEVEL可以通过环境变量设置，默认为warn
+# 使用方法: LOG_LEVEL=debug ./build_riscv_release.sh
+LOG_LEVEL=${LOG_LEVEL:-warn}
 
 cmake .. \
-    -DCMAKE_BUILD_TYPE=Debug \
+    -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_SYSTEM_NAME=Linux \
     -DCMAKE_SYSTEM_PROCESSOR=riscv64 \
     -DCMAKE_C_COMPILER=${CC} \
@@ -38,5 +38,6 @@ cmake .. \
 # 编译
 make -j$(nproc)
 
-echo "Debug version compiled successfully!"
+echo "Release version compiled successfully!"
 echo "Executable: $(pwd)/tennis"
+echo "Log level: ${LOG_LEVEL} (default: warn, override with LOG_LEVEL=xxx)"

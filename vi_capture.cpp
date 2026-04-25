@@ -271,7 +271,7 @@ int VICapture::getFrameAsBGR(CVI_U8 chn, cv::Mat& bgr_image) {
              
              gettimeofday(&t2, NULL);
              cvt_us = (t2.tv_sec - t1.tv_sec) * 1000000 + (t2.tv_usec - t1.tv_usec);
-             printf("[VI-DETAIL] GetFrame: %.1fms, VPSS_Resize+CvB: %.1fms, Cvt: %.1fms (VPSSDirect+Cache)\n", 
+             LOGD("[VI-DETAIL] GetFrame: %.1fms, VPSS_Resize+CvB: %.1fms, Cvt: %.1fms (VPSSDirect+Cache)",
                     get_frame_us / 1000.0, resize_us / 1000.0, cvt_us / 1000.0);
                     
              CVI_VPSS_ReleaseChnFrame(m_VpssGrp, m_VpssChn, &stResizedFrame);
@@ -308,7 +308,7 @@ int VICapture::getFrameAsBGR(CVI_U8 chn, cv::Mat& bgr_image) {
         gettimeofday(&t2, NULL);
         cvt_us = (t2.tv_sec - t1.tv_sec) * 1000000 + (t2.tv_usec - t1.tv_usec);
 
-        printf("[VI-DETAIL] GetFrame: %.1fms, VPSS_Resize: %.1fms, Cvt: %.1fms (Stride=%d)\n", 
+        LOGD("[VI-DETAIL] GetFrame: %.1fms, VPSS_Resize: %.1fms, Cvt: %.1fms (Stride=%d)",
                get_frame_us / 1000.0, resize_us / 1000.0, cvt_us / 1000.0, stride_y);
 
         CVI_SYS_Munmap(vir_addr, image_size);
@@ -491,7 +491,7 @@ int VICapture::getFrameAsNV21(CVI_U8 chn, cv::Mat& nv21_image) {
     gettimeofday(&t2, NULL);
     copy_us = (t2.tv_sec - t1.tv_sec) * 1000000 + (t2.tv_usec - t1.tv_usec);
 
-    printf("[VI-FAST] GetFrame: %.1fms, VPSS_Resize: %.1fms, Copy: %.1fms (Total: %.1fms)\n",
+    LOGD("[VI-FAST] GetFrame: %.1fms, VPSS_Resize: %.1fms, Copy: %.1fms (Total: %.1fms)",
            get_frame_us / 1000.0, resize_us / 1000.0, copy_us / 1000.0,
            (get_frame_us + resize_us + copy_us) / 1000.0);
 

@@ -33,6 +33,8 @@ elseif(LOG_LEVEL STREQUAL "WARN")
   add_definitions(-DCURRENT_LOG_LEVEL=2)
 elseif(LOG_LEVEL STREQUAL "ERROR")
   add_definitions(-DCURRENT_LOG_LEVEL=3)
+elseif(LOG_LEVEL STREQUAL "release")
+  add_definitions(-DCURRENT_LOG_LEVEL=2)  # Release uses WARN level (only FPS and errors)
 else()
   add_definitions(-DCURRENT_LOG_LEVEL=1) # Default to INFO
 endif()

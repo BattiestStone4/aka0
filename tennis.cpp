@@ -225,7 +225,7 @@ int main(int argc, char** argv) {
         gettimeofday(&start_time, NULL);
 
         frame_idx++;
-        LOGI("\n[Frame %d]", frame_idx);
+        LOGD("\n[Frame %d]", frame_idx);
 
         // Get YUV frame from VI (NV21 format, no conversion)
         gettimeofday(&t1, NULL);
@@ -246,7 +246,7 @@ int main(int argc, char** argv) {
         gettimeofday(&t2, NULL);
         long read_time = (t2.tv_sec - t1.tv_sec) * 1000000 + (t2.tv_usec - t1.tv_usec);
 
-        LOGI("[PERF] Read NV21: %.1fms", read_time / 1000.0);
+        LOGD("[PERF] Read NV21: %.1fms", read_time / 1000.0);
 
         // Direct NV21 to planar RGB conversion (saves ~56ms total)
         gettimeofday(&t1, NULL);
@@ -286,14 +286,14 @@ int main(int argc, char** argv) {
         }
         gettimeofday(&t2, NULL);
         long preprocess_time = (t2.tv_sec - t1.tv_sec) * 1000000 + (t2.tv_usec - t1.tv_usec);
-        LOGI("[PERF] Preprocess: %.1fms", preprocess_time / 1000.0);
+        LOGD("[PERF] Preprocess: %.1fms", preprocess_time / 1000.0);
 
         // run inference
         gettimeofday(&t1, NULL);
         CVI_NN_Forward(model, input_tensors, input_num, output_tensors, output_num);
         gettimeofday(&t2, NULL);
         long inference_time = (t2.tv_sec - t1.tv_sec) * 1000000 + (t2.tv_usec - t1.tv_usec);
-        LOGI("[PERF] Inference: %.1fms", inference_time / 1000.0);
+        LOGD("[PERF] Inference: %.1fms", inference_time / 1000.0);
 
         // do post proprocess
         gettimeofday(&t1, NULL);
@@ -306,7 +306,7 @@ int main(int argc, char** argv) {
         correctYoloBoxes(dets, det_num, FRAME_WIDTH, FRAME_WIDTH, height, width);
         gettimeofday(&t2, NULL);
         long postprocess_time = (t2.tv_sec - t1.tv_sec) * 1000000 + (t2.tv_usec - t1.tv_usec);
-        LOGI("[PERF] Postprocess: %.1fms", postprocess_time / 1000.0);
+        LOGD("[PERF] Postprocess: %.1fms", postprocess_time / 1000.0);
 
         // ============ 状态机控制逻辑 ============
         if (det_num > 0) {
@@ -326,7 +326,7 @@ int main(int argc, char** argv) {
             robot.area_ratio = area_ratio;
             robot.ball_cx = ball_cx;
 
-            LOGI("[DETECT] area=%.3f cx=%d conf=%.3f status=%s",
+            LOGD("[DETECT] area=%.3f cx=%d conf=%.3f status=%s",
                  area_ratio, ball_cx, dets[best_idx].score, status_name(robot.status));
 
             int offset = ball_cx - center;
@@ -338,11 +338,11 @@ int main(int argc, char** argv) {
             if (area_ratio >= GRAB_AREA && centered) {
                 // 球足够近且居中 → 确认计数
                 robot.grab_confirm_count++;
-                LOGI("[GRAB] confirm %d/%d (area=%.3f cx=%d)", robot.grab_confirm_count, GRAB_CONFIRM_THRESHOLD, area_ratio, ball_cx);
+                LOGD("[GRAB] confirm %d/%d (area=%.3f cx=%d)", robot.grab_confirm_count, GRAB_CONFIRM_THRESHOLD, area_ratio, ball_cx);
 
                 if (area_ratio >= GRAB_AREA_MAX) {
                     // 太近了，微微后退
-                    LOGI("[GRAB] Too close (area=%.3f > %.3f), backing up", area_ratio, GRAB_AREA_MAX);
+                    LOGD("[GRAB] Too close (area=%.3f > %.3f), backing up", area_ratio, GRAB_AREA_MAX);
                     motor.backward(BACKWARD_SPEED);
                     usleep(BACKWARD_PULSE_US);
                     motor.standby();
@@ -353,24 +353,24 @@ int main(int argc, char** argv) {
                 if (robot.grab_confirm_count >= GRAB_CONFIRM_THRESHOLD) {
                     // 太近后退一步再抓
                     if (area_ratio >= GRAB_AREA_MAX) {
-                        LOGI("[GRAB] Backing up before grab");
+                        LOGD("[GRAB] Backing up before grab");
                         motor.backward(BACKWARD_SPEED);
                         usleep(BACKWARD_PULSE_US);
                         motor.standby();
                     }
 
-                    LOGI("[ARM] Confirmed, compensating gripper offset...");
+                    LOGD("[ARM] Confirmed, compensating gripper offset...");
 
                     // 爪子偏右，连续多次左转补偿
                     for (int i = 0; i < GRAB_LEFT_TURN_COUNT; i++) {
-                        LOGI("[GRAB] Left turn compensation %d/%d (%dms)", i + 1, GRAB_LEFT_TURN_COUNT, GRAB_LEFT_TURN_US / 1000);
+                        LOGD("[GRAB] Left turn compensation %d/%d (%dms)", i + 1, GRAB_LEFT_TURN_COUNT, GRAB_LEFT_TURN_US / 1000);
                         motor.drive(-GRAB_LEFT_TURN_SPEED, GRAB_LEFT_TURN_SPEED);
                         usleep(GRAB_LEFT_TURN_US);
                         motor.standby();
                         usleep(100 * 1000);  // 间隔100ms
                     }
 
-                    LOGI("[ARM] Full grab sequence");
+                    LOGD("[ARM] Full grab sequence");
 
                     // 抓取: 伸下→夹紧→抬起→停2秒
                     arm.grab();
@@ -387,7 +387,7 @@ int main(int argc, char** argv) {
             } else if (area_ratio >= GRAB_AREA && !centered) {
                 // 球够近但没居中 → 原地微调（脉冲式），不前进
                 robot.grab_confirm_count = 0;
-                LOGI("[ALIGN] area=%.3f OK but cx=%d not centered, pulse=%dms", area_ratio, ball_cx, pulse_us / 1000);
+                LOGD("[ALIGN] area=%.3f OK but cx=%d not centered, pulse=%dms", area_ratio, ball_cx, pulse_us / 1000);
                 if (offset < 0) {
                     motor.drive(-TURN_SPEED, TURN_SPEED);
                 } else {
@@ -403,17 +403,17 @@ int main(int argc, char** argv) {
                 if (!centered) {
                     // 球偏左或偏右 → 差速原地转向（脉冲式）
                     if (offset < 0) {
-                        LOGI("[MOTOR] TURN LEFT (cx=%d offset=%d pulse=%dms)", ball_cx, offset, pulse_us / 1000);
+                        LOGD("[MOTOR] TURN LEFT (cx=%d offset=%d pulse=%dms)", ball_cx, offset, pulse_us / 1000);
                         motor.drive(-TURN_SPEED, TURN_SPEED);
                     } else {
-                        LOGI("[MOTOR] TURN RIGHT (cx=%d offset=%d pulse=%dms)", ball_cx, offset, pulse_us / 1000);
+                        LOGD("[MOTOR] TURN RIGHT (cx=%d offset=%d pulse=%dms)", ball_cx, offset, pulse_us / 1000);
                         motor.drive(TURN_SPEED, -TURN_SPEED);
                     }
                     usleep(pulse_us);
                     motor.standby();
                 } else {
                     // 球基本居中 → 前进
-                    LOGI("[MOTOR] FORWARD (cx=%d area=%.3f < %.3f)", ball_cx, area_ratio, GRAB_AREA);
+                    LOGD("[MOTOR] FORWARD (cx=%d area=%.3f < %.3f)", ball_cx, area_ratio, GRAB_AREA);
                     motor.forward(CHASE_SPEED);
                 }
             }
@@ -446,7 +446,7 @@ int main(int argc, char** argv) {
 #endif
 
         } else {
-            LOGI("[DETECT] No ball detected, searching...");
+            LOGD("[DETECT] No ball detected, searching...");
             robot.grab_confirm_count = 0;
             robot.status = STATUS_CHASE_TENNIS;
             motor.drive(IDLE_SPEED, -IDLE_SPEED);  // 没看到球就连续右转搜索
@@ -459,7 +459,7 @@ int main(int argc, char** argv) {
                 char output_path[256];
                 sprintf(output_path, "%s/detected_%d.jpg", save_dir, frame_idx);
                 bool ok = cv::imwrite(output_path, cloned);
-                LOGI("[SAVE] %s %s", output_path, ok ? "OK" : "FAILED");
+                LOGD("[SAVE] %s %s", output_path, ok ? "OK" : "FAILED");
             }
 #endif
         // 计算帧率
@@ -471,7 +471,7 @@ int main(int argc, char** argv) {
         total_time_us += frame_time_us;
         float avg_fps = 1000000.0f * frame_count / total_time_us;
 
-        LOGI("[FPS] %.2f  avg: %.2f  (%.1fms)", fps, avg_fps, frame_time_us / 1000.0f);
+        printf("[FPS] %.2f  avg: %.2f  (%.1fms)\n", fps, avg_fps, frame_time_us / 1000.0f);
 
         // 持续运行，无帧数限制
         // if (frame_idx >= 200) break;

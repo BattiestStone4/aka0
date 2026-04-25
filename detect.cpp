@@ -3,6 +3,7 @@
 // Description: 通用 YOLO 检测模块实现 - 支持所有模型格式（INT8/UINT8/BF16/FP32/INT16）
 
 #include "detect.hpp"
+#include "logger.hpp"
 #include <stdio.h>
 #include <math.h>
 #include  <string.h>
@@ -118,7 +119,7 @@ int getDetections(CVI_TENSOR* output,
     int channels  = output_shape.dim[1]; // 4 + classes_num
     int num_boxes = output_shape.dim[2];
 
-    printf("[DETECT] batch=%d channels=%d num_boxes=%d fmt=%d qscale=%f\n",
+    LOGD("[DETECT] batch=%d channels=%d num_boxes=%d fmt=%d qscale=%f",
            batch, channels, num_boxes, (int)output[0].fmt, output[0].qscale);
 
     // 反量化到 float
@@ -142,14 +143,14 @@ int getDetections(CVI_TENSOR* output,
             for (size_t i = 0; i < count; i++) {
                 data[i] = src[i] * qscale;
             }
-            printf("[DETECT] INT8 model detected, dequantized with qscale=%.6f\n", qscale);
+            LOGD("[DETECT] INT8 model detected, dequantized with qscale=%.6f", qscale);
         } else if (output[0].fmt == CVI_FMT_UINT8) {
             // UINT8 反量化
             uint8_t* src = (uint8_t*)src_ptr;
             for (size_t i = 0; i < count; i++) {
                 data[i] = (src[i] - output[0].zero_point) * qscale;
             }
-            printf("[DETECT] UINT8 model detected, dequantized with qscale=%.6f zp=%d\n",
+            LOGD("[DETECT] UINT8 model detected, dequantized with qscale=%.6f zp=%d",
                    qscale, output[0].zero_point);
         } else if (output[0].fmt == CVI_FMT_BF16) {
             // BF16 转 FP32
@@ -158,16 +159,16 @@ int getDetections(CVI_TENSOR* output,
                 uint32_t v = (uint32_t)src[i] << 16;
                 memcpy(&data[i], &v, sizeof(float));
             }
-            printf("[DETECT] BF16 model detected, converted to FP32\n");
+            LOGD("[DETECT] BF16 model detected, converted to FP32");
         } else if (output[0].fmt == CVI_FMT_INT16) {
             // INT16 反量化
             int16_t* src = (int16_t*)src_ptr;
             for (size_t i = 0; i < count; i++) {
                 data[i] = src[i] * qscale;
             }
-            printf("[DETECT] INT16 model detected, dequantized with qscale=%.6f\n", qscale);
+            LOGD("[DETECT] INT16 model detected, dequantized with qscale=%.6f", qscale);
         } else {
-            printf("[DETECT] Unsupported format: %d\n", (int)output[0].fmt);
+            LOGE("[DETECT] Unsupported format: %d", (int)output[0].fmt);
             memset(data, 0, count * sizeof(float));
         }
     }

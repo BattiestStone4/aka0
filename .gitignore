@@ -1,2 +1,3 @@
 /build_riscv_debug
+/build_riscv_release
 *.o
