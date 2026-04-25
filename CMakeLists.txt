@@ -63,7 +63,10 @@ set(EXTRA_LIBS ${EXTRA_LIBS} dl stdc++ pthread z atomic)
 # Author: Zhihang Shao <dio_ro@outlook.com>
 # Source: aka0-ref commit 755a885
 # 添加机械臂支持
-add_executable(tennis tennis.cpp motor.cpp arm.cpp vi_capture.cpp)
+# Author: Zhihang Shao <dio_ro@outlook.com>
+# Source: aka0-ref commits 64f8dab, 7b7011d
+# 添加通用检测模块支持
+add_executable(tennis tennis.cpp motor.cpp arm.cpp vi_capture.cpp detect.cpp)
 target_link_libraries(tennis
     ${CVI_LIBS}
     ${OPENCV_LIBS}
@@ -88,7 +91,10 @@ add_executable(test_arm tests/test_arm.cpp arm.cpp)
 add_executable(test_motor tests/test_motor.cpp motor.cpp)
 
 # Single-frame capture + detection utility
-add_executable(test_capture_detect tests/test_capture_detect.cpp vi_capture.cpp)
+# Author: Zhihang Shao <dio_ro@outlook.com>
+# Source: aka0-ref commits 64f8dab, 7b7011d
+# 使用通用检测模块
+add_executable(test_capture_detect tests/test_capture_detect.cpp vi_capture.cpp detect.cpp)
 target_link_libraries(test_capture_detect
     ${CVI_LIBS}
     ${OPENCV_LIBS}
@@ -97,4 +103,14 @@ target_link_libraries(test_capture_detect
     vpu cvi_ispd2 cvi_bin_isp cvi_bin
     sns_full sys ini json-c
     -Wl,--end-group
+    ${EXTRA_LIBS})
+
+# Static image detection utility
+# Author: Zhihang Shao <dio_ro@outlook.com>
+# Source: aka0-ref commit 64f8dab
+# 使用通用检测模块
+add_executable(test_img_detect tests/test_img_detect.cpp detect.cpp)
+target_link_libraries(test_img_detect
+    ${CVI_LIBS}
+    ${OPENCV_LIBS}
     ${EXTRA_LIBS})

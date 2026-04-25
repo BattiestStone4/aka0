@@ -6,114 +6,13 @@
 #include "vi_capture.hpp"
 #include "cviruntime.h"
 #include "logger.hpp"
+#include "detect.hpp"
 #include <unistd.h>
 #include <sys/stat.h>
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
 #include <vector>
-
-typedef struct {
-    float x, y, w, h;
-} box;
-
-typedef struct {
-    box bbox;
-    int cls;
-    float score;
-    int batch_idx;
-} detection;
-
-// ---- YOLO post-processing (same as tennis.cpp) ----
-
-float calIou(box a, box b) {
-    float area1 = a.w * a.h;
-    float area2 = b.w * a.h;
-    float wi = std::min((a.x + a.w / 2), (b.x + b.w / 2)) - std::max((a.x - a.w / 2), (b.x - b.w / 2));
-    float hi = std::min((a.y + a.h / 2), (b.y + b.h / 2)) - std::max((a.y - a.h / 2), (b.y - b.h / 2));
-    float area_i = std::max(wi, 0.0f) * std::max(hi, 0.0f);
-    return area_i / (area1 + area2 - area_i);
-}
-
-static void NMS(std::vector<detection>& dets, int* total, float thresh) {
-    if (*total) {
-        std::sort(dets.begin(), dets.end(), [](detection& a, detection& b) { return b.score < a.score; });
-        int new_count = *total;
-        for (int i = 0; i < *total; ++i) {
-            if (dets[i].score == 0) continue;
-            for (int j = i + 1; j < *total; ++j) {
-                if (dets[j].score != 0 && dets[i].cls == dets[j].cls &&
-                    calIou(dets[i].bbox, dets[j].bbox) > thresh) {
-                    dets[j].score = 0;
-                    new_count--;
-                }
-            }
-        }
-        dets.erase(std::remove_if(dets.begin(), dets.end(),
-            [](const detection& d) { return d.score == 0; }), dets.end());
-        *total = new_count;
-    }
-}
-
-void correctYoloBoxes(std::vector<detection>& dets, int det_num, int image_h, int image_w,
-                      int input_height, int input_width) {
-    float scale = std::min((float)input_width / image_w, (float)input_height / image_h);
-    int new_h = (int)(image_h * scale);
-    int new_w = (int)(image_w * scale);
-    int pad_top = (input_height - new_h) / 2;
-    int pad_left = (input_width - new_w) / 2;
-    for (int i = 0; i < det_num; ++i) {
-        float cx = dets[i].bbox.x, cy = dets[i].bbox.y;
-        float w = dets[i].bbox.w, h = dets[i].bbox.h;
-        float x1 = std::max(0.0f, (cx - 0.5f * w - pad_left) / scale);
-        float y1 = std::max(0.0f, (cy - 0.5f * h - pad_top) / scale);
-        float x2 = std::min((float)image_w, (cx + 0.5f * w - pad_left) / scale);
-        float y2 = std::min((float)image_h, (cy + 0.5f * h - pad_top) / scale);
-        dets[i].bbox.x = (x1 + x2) / 2.0f;
-        dets[i].bbox.y = (y1 + y2) / 2.0f;
-        dets[i].bbox.w = x2 - x1;
-        dets[i].bbox.h = y2 - y1;
-    }
-}
-
-int getDetections(CVI_TENSOR* output, int32_t input_height, int32_t input_width,
-                  CVI_SHAPE output_shape, float conf_thresh, std::vector<detection>& dets) {
-    if (!output) return 0;
-    float* ptr = (float*)CVI_NN_TensorPtr(&output[0]);
-    if (!ptr) return 0;
-
-    float stride[3] = {8, 16, 32};
-    int batch = output_shape.dim[0];
-    int channels = output_shape.dim[1];
-    int total_anchors = output_shape.dim[2];
-    int count = 0, anchor_offset = 0;
-
-    for (int b = 0; b < batch; b++) {
-        anchor_offset = 0;
-        for (int s = 0; s < 3; s++) {
-            int nh = input_height / (int)stride[s];
-            int nw = input_width / (int)stride[s];
-            int current = nh * nw;
-            for (int a = 0; a < current; a++) {
-                int idx = anchor_offset + a;
-                float obj = ptr[4 * total_anchors + idx];
-                if (obj <= conf_thresh) continue;
-                detection det;
-                det.score = obj;
-                det.cls = 0;
-                det.batch_idx = b;
-                det.bbox.x = ptr[0 * total_anchors + idx];
-                det.bbox.y = ptr[1 * total_anchors + idx];
-                det.bbox.w = ptr[2 * total_anchors + idx];
-                det.bbox.h = ptr[3 * total_anchors + idx];
-                count++;
-                dets.emplace_back(det);
-            }
-            anchor_offset += current;
-        }
-    }
-    return count;
-}
 
 // ---- Main ----
 
@@ -201,8 +100,9 @@ int main(int argc, char** argv) {
 
     // Post-process
     float conf_thresh = 0.5f, iou_thresh = 0.5f;
+    int classes_num = 1; // 单类别网球检测
     std::vector<detection> dets;
-    int det_num = getDetections(output_tensors, height, width, output_shape[0], conf_thresh, dets);
+    int det_num = getDetections(output_tensors, height, width, classes_num, output_shape[0], conf_thresh, dets);
     NMS(dets, &det_num, iou_thresh);
     correctYoloBoxes(dets, det_num, image.rows, image.cols, height, width);
 

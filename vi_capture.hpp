@@ -54,6 +54,18 @@ public:
      */
     int getFrameAsBGR(CVI_U8 chn, cv::Mat& bgr_image);
 
+#if USE_VPSS_RESIZE
+    /**
+     * @brief 从VI通道获取NV21格式的缩放帧（避免格式转换，用于高性能场景）
+     * @param chn VI通道号
+     * @param nv21_data 输出的NV21数据缓冲区（大小为width*height*3/2）
+     * @param width 输出图像宽度
+     * @param height 输出图像高度
+     * @return CVI_SUCCESS on success, otherwise CVI_FAILURE
+     */
+    int getFrameAsNV21(CVI_U8 chn, cv::Mat& nv21_image);
+#endif
+
 private:
     SAMPLE_VI_CONFIG_S m_stViConfig;
     SAMPLE_INI_CFG_S m_stIniCfg;

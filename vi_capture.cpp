@@ -404,3 +404,97 @@ int VICapture::getFrameAsBGR(CVI_U8 chn, cv::Mat& bgr_image) {
     LOGE("CVI_VI_GetChnFrame NG");
     return CVI_FAILURE;
 }
+
+#if USE_VPSS_RESIZE
+int VICapture::getFrameAsNV21(CVI_U8 chn, cv::Mat& nv21_image) {
+    VIDEO_FRAME_INFO_S stVideoFrame;
+    struct timeval t1, t2;
+    long get_frame_us, resize_us, copy_us;
+
+    gettimeofday(&t1, NULL);
+    if (CVI_VI_GetChnFrame(0, chn, &stVideoFrame, 3000) != 0) {
+        LOGE("CVI_VI_GetChnFrame NG");
+        return CVI_FAILURE;
+    }
+    gettimeofday(&t2, NULL);
+    get_frame_us = (t2.tv_sec - t1.tv_sec) * 1000000 + (t2.tv_usec - t1.tv_usec);
+
+    if (!m_bVpssInited) {
+        LOGE("VPSS not initialized!");
+        CVI_VI_ReleaseChnFrame(0, chn, &stVideoFrame);
+        return CVI_FAILURE;
+    }
+
+    // Send frame to VPSS for hardware resize
+    gettimeofday(&t1, NULL);
+    CVI_S32 s32Ret = CVI_VPSS_SendFrame(m_VpssGrp, &stVideoFrame, -1);
+    if (s32Ret != CVI_SUCCESS) {
+        LOGE("CVI_VPSS_SendFrame failed: 0x%x", s32Ret);
+        CVI_VI_ReleaseChnFrame(0, chn, &stVideoFrame);
+        return CVI_FAILURE;
+    }
+
+    // Get resized frame from VPSS
+    VIDEO_FRAME_INFO_S stResizedFrame;
+    s32Ret = CVI_VPSS_GetChnFrame(m_VpssGrp, m_VpssChn, &stResizedFrame, 1000);
+    if (s32Ret != CVI_SUCCESS) {
+        LOGE("CVI_VPSS_GetChnFrame failed: 0x%x", s32Ret);
+        CVI_VI_ReleaseChnFrame(0, chn, &stVideoFrame);
+        return CVI_FAILURE;
+    }
+    gettimeofday(&t2, NULL);
+    resize_us = (t2.tv_sec - t1.tv_sec) * 1000000 + (t2.tv_usec - t1.tv_usec);
+
+    // Copy NV21 data directly without format conversion
+    gettimeofday(&t1, NULL);
+
+    int width = stResizedFrame.stVFrame.u32Width;
+    int height = stResizedFrame.stVFrame.u32Height;
+    int stride_y = stResizedFrame.stVFrame.u32Stride[0];
+    int stride_uv = stResizedFrame.stVFrame.u32Stride[1];
+
+    size_t y_size = stride_y * height;
+    size_t uv_size = stride_uv * height / 2;
+    size_t image_size = y_size + uv_size;
+
+    CVI_VOID* vir_addr = CVI_SYS_MmapCache(stResizedFrame.stVFrame.u64PhyAddr[0], image_size);
+    CVI_SYS_IonInvalidateCache(stResizedFrame.stVFrame.u64PhyAddr[0], vir_addr, image_size);
+
+    // Allocate or reuse NV21 buffer
+    if (nv21_image.empty() || nv21_image.rows != height * 3 / 2 || nv21_image.cols != width) {
+        nv21_image.create(height * 3 / 2, width, CV_8UC1);
+    }
+
+    // Copy Y plane
+    if (stride_y == width) {
+        memcpy(nv21_image.data, vir_addr, width * height);
+    } else {
+        for (int i = 0; i < height; i++) {
+            memcpy(nv21_image.data + i * width, (uint8_t*)vir_addr + i * stride_y, width);
+        }
+    }
+
+    // Copy UV plane (VU interleaved for NV21)
+    if (stride_uv == width) {
+        memcpy(nv21_image.data + width * height, (uint8_t*)vir_addr + y_size, width * height / 2);
+    } else {
+        for (int i = 0; i < height / 2; i++) {
+            memcpy(nv21_image.data + width * height + i * width,
+                   (uint8_t*)vir_addr + y_size + i * stride_uv, width);
+        }
+    }
+
+    CVI_SYS_Munmap(vir_addr, image_size);
+    CVI_VPSS_ReleaseChnFrame(m_VpssGrp, m_VpssChn, &stResizedFrame);
+    CVI_VI_ReleaseChnFrame(0, chn, &stVideoFrame);
+
+    gettimeofday(&t2, NULL);
+    copy_us = (t2.tv_sec - t1.tv_sec) * 1000000 + (t2.tv_usec - t1.tv_usec);
+
+    printf("[VI-FAST] GetFrame: %.1fms, VPSS_Resize: %.1fms, Copy: %.1fms (Total: %.1fms)\n",
+           get_frame_us / 1000.0, resize_us / 1000.0, copy_us / 1000.0,
+           (get_frame_us + resize_us + copy_us) / 1000.0);
+
+    return CVI_SUCCESS;
+}
+#endif
