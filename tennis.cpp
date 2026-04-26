@@ -32,8 +32,12 @@
 #include "arm.hpp"
 #include "detect.hpp"
 
+#if USE_ESP32_CAMERA
+#include "esp32_capture.hpp"
+#else
 // VI related headers - must include base types first
 #include "vi_capture.hpp"
+#endif
 #include "logger.hpp"
 
 // 控制宏定义
@@ -44,16 +48,24 @@
 static const char* tennis_names[] = {"tennis"}; // 单类别网球检测
 
 // 全局指针，用于信号处理中清理资源
+#if USE_ESP32_CAMERA
+static ESP32Capture* g_capture = nullptr;
+#else
 static VICapture* g_vi_capture = nullptr;
+#endif
 static Motor* g_motor = nullptr;
 static CVI_MODEL_HANDLE g_model = nullptr;
 
 static void cleanup_and_exit() {
     if (g_motor) g_motor->standby();
-#if USE_VPSS_RESIZE
+#if USE_ESP32_CAMERA
+    if (g_capture) g_capture->deinit();
+#else
+  #if USE_VPSS_RESIZE
     if (g_vi_capture) g_vi_capture->deinitVpssResize();
-#endif
+  #endif
     if (g_vi_capture) g_vi_capture->deinit();
+#endif
     if (g_model) CVI_NN_CleanupModel(g_model);
 }
 
@@ -127,7 +139,18 @@ int main(int argc, char** argv) {
         exit(-1);
     }
 
-    CVI_U8 vi_channel = 0; // Default VI channel
+#if USE_ESP32_CAMERA
+    // Initialize ESP32-CAM
+    ESP32Capture capture;
+    g_capture = &capture;
+    if (capture.init("/dev/cvi-camera") != 0) {
+        LOGE("Failed to initialize ESP32-CAM");
+        exit(-1);
+    }
+    capture.setResize(640, 640);
+    LOGI("ESP32-CAM initialized (%ux%u)", capture.getWidth(), capture.getHeight());
+#else
+    CVI_U8 vi_channel = 0;
     if (argc == 3) {
         vi_channel = atoi(argv[2]);
     }
@@ -148,7 +171,7 @@ int main(int argc, char** argv) {
     // Wait for sensor to stabilize
     usleep(500 * 1000);
 
-#if USE_VPSS_RESIZE
+  #if USE_VPSS_RESIZE
     // Initialize VPSS for hardware resize (2560x1440 -> 640x640)
     LOGI("Initializing VPSS for hardware resize...");
     if (vi_capture.initVpssResize(2560, 1440, 640, 640) != CVI_SUCCESS) {
@@ -157,6 +180,7 @@ int main(int argc, char** argv) {
         exit(-1);
     }
     LOGI("VPSS initialized successfully");
+  #endif
 #endif
 
     // 初始化电机、机械臂和状态机
@@ -227,34 +251,48 @@ int main(int argc, char** argv) {
         frame_idx++;
         LOGD("\n[Frame %d]", frame_idx);
 
-        // Get YUV frame from VI (NV21 format, no conversion)
+        // Get frame from camera
         gettimeofday(&t1, NULL);
+
+#if USE_ESP32_CAMERA
+        cv::Mat bgr_image;
+        if (capture.getFrameAsBGR(bgr_image) != 0) {
+            LOGW("Failed to get frame from ESP32-CAM");
+            usleep(100000);
+            continue;
+        }
+#else
         cv::Mat nv21_image;
         if (vi_capture.getFrameAsNV21(vi_channel, nv21_image) != CVI_SUCCESS) {
             LOGW("Failed to get frame from VI channel %d", vi_channel);
             usleep(100000); // 休眠0.1秒
             continue;
         }
+#endif
 
-        if (!nv21_image.data) {
-            LOGW("Empty image data");
-            usleep(100000);
-            continue;
-        }
-
-        cv::Mat cloned; // No need to clone for visualization when ENABLE_DRAW_BBOX=0
         gettimeofday(&t2, NULL);
         long read_time = (t2.tv_sec - t1.tv_sec) * 1000000 + (t2.tv_usec - t1.tv_usec);
+        LOGD("[PERF] Read frame: %.1fms", read_time / 1000.0);
 
-        LOGD("[PERF] Read NV21: %.1fms", read_time / 1000.0);
-
-        // Direct NV21 to planar RGB conversion (saves ~56ms total)
+        // Preprocess: fill NN input tensor with planar RGB data
         gettimeofday(&t1, NULL);
 
         int8_t* ptr = (int8_t*)CVI_NN_TensorPtr(input);
         int channel_size = height * width;
 
-        // NV21 layout: Y plane (width*height) + VU interleaved plane (width*height/2)
+#if USE_ESP32_CAMERA
+        // BGR → planar RGB (ESP32-CAM returns BGR via JPEG decode)
+        cv::Mat rgb;
+        cv::cvtColor(bgr_image, rgb, cv::COLOR_BGR2RGB);
+
+        // Split channels and copy to NCHW tensor
+        std::vector<cv::Mat> channels(3);
+        cv::split(rgb, channels);
+        memcpy(ptr + 0 * channel_size, channels[0].data, channel_size);
+        memcpy(ptr + 1 * channel_size, channels[1].data, channel_size);
+        memcpy(ptr + 2 * channel_size, channels[2].data, channel_size);
+#else
+        // Direct NV21 to planar RGB conversion (saves ~56ms total)
         const uint8_t* y_plane = nv21_image.ptr<uint8_t>(0);
         const uint8_t* vu_plane = nv21_image.ptr<uint8_t>(height);
 
@@ -267,23 +305,22 @@ int main(int argc, char** argv) {
                 int u_val = vu_plane[uv_idx];     // V in NV21
                 int v_val = vu_plane[uv_idx + 1]; // U in NV21
 
-                // YUV to RGB conversion (optimized integer math)
                 int r = y_val + ((351 * (v_val - 128)) >> 8);
                 int g = y_val - (((179 * (u_val - 128)) >> 8) + ((86 * (v_val - 128)) >> 8));
                 int b = y_val + ((453 * (u_val - 128)) >> 8);
 
-                // Clamp to [0, 255]
                 r = (r < 0) ? 0 : (r > 255) ? 255 : r;
                 g = (g < 0) ? 0 : (g > 255) ? 255 : g;
                 b = (b < 0) ? 0 : (b > 255) ? 255 : b;
 
-                // Write to planar RGB tensor
                 int dst_idx = y * width + x;
                 ptr[0 * channel_size + dst_idx] = r;
                 ptr[1 * channel_size + dst_idx] = g;
                 ptr[2 * channel_size + dst_idx] = b;
             }
         }
+#endif
+
         gettimeofday(&t2, NULL);
         long preprocess_time = (t2.tv_sec - t1.tv_sec) * 1000000 + (t2.tv_usec - t1.tv_usec);
         LOGD("[PERF] Preprocess: %.1fms", preprocess_time / 1000.0);
