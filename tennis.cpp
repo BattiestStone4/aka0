@@ -100,16 +100,28 @@ static const char* status_name(RobotStatus s) {
 
 // 控制参数
 static const int FRAME_WIDTH       = 640;
-static const float GRAB_AREA       = 0.40f;  // area_ratio >= 此值 → 抓取（提前触发抵消惯性）
-static const int CENTER_MARGIN     = 35;     // 球中心距画面中心 ±35px 内算居中
+
+#if USE_ESP32_CAMERA
+// ESP32-CAM: FOV wider, ball appears smaller at same distance
+static const float GRAB_AREA       = 0.55f;  // Higher threshold: ESP32 FOV wider, need closer
+static const int CENTER_MARGIN     = 55;     // Wider margin to reduce oscillation
+static const float K_TURN_PULSE    = 3000.0f; // Less aggressive turning
+static const int TURN_PULSE_MAX    = 300 * 1000;  // Shorter max pulse
+static const float GRAB_AREA_MAX   = 0.70f;  // Back up threshold
+#else
+// VI camera: narrower FOV
+static const float GRAB_AREA       = 0.40f;
+static const int CENTER_MARGIN     = 35;
+static const float K_TURN_PULSE    = 5000.0f;
+static const int TURN_PULSE_MAX    = 500 * 1000;
+static const float GRAB_AREA_MAX   = 0.55f;
+#endif
+
 static const int CHASE_SPEED       = 56;     // 追球前进速度
 static const int TURN_SPEED        = 18;     // 原地转向速度（数值越小越慢）
 static const int IDLE_SPEED        = 18;     // 没看到球时的搜索速度
-static const float K_TURN_PULSE    = 5000.0f; // 转向脉冲系数(ms)：pulse = K * area_ratio
 static const int TURN_PULSE_MIN    = 75 * 1000;  // 最小脉冲 75ms（保证电机能动）
-static const int TURN_PULSE_MAX    = 500 * 1000;  // 最大脉冲 500ms（防止近处转过头丢球）
 static const int GRAB_CONFIRM_THRESHOLD = 5;
-static const float GRAB_AREA_MAX = 0.55f;  // area 超过此值太近，先后退
 static const int BACKWARD_SPEED = 18;      // 后退速度
 static const int BACKWARD_PULSE_US = 200 * 1000; // 后退脉冲时间
 static const int GRAB_LEFT_TURN_SPEED = 18;       // 抓取前左转补偿速度（数值越小越慢）
